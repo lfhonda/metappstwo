@@ -13,11 +13,7 @@ type Event struct {
 	Place           string    `gorm:"not null" json:"place"`
 	Category        string    `gorm:"not null" json:"category"`
 	Date            time.Time `gorm:"not null" json:"date"`
+	EndDate         time.Time `gorm:"not null" json:"end_date"`
 	MaxParticipants int       `gorm:"not null" json:"max_participants"`
-}
-
-type EventRegistration struct {
-	gorm.Model
-	StudentID uint `gorm:"not null;uniqueIndex:idx_student_event" json:"student_id"`
-	EventID   uint `gorm:"not null;uniqueIndex:idx_student_event" json:"event_id"`
+	CheckInToken    string    `gorm:"uniqueIndex;not null" json:"-"`
 }

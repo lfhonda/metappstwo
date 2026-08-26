@@ -2,110 +2,90 @@ package event
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 var (
-	ErrEventNotFound          = errors.New("event not found")
-	ErrEventFull              = errors.New("event is full")
-	ErrAlreadyRegistered      = errors.New("student is already registered")
-	ErrRegistrationNotFound   = errors.New("registration not found")
-	ErrInvalidMaxParticipants = errors.New("max participants must be greater than zero")
+	ErrEventNotFound        = errors.New("event not found")
+	ErrEventFull            = errors.New("event is full")
+	ErrAlreadyRegistered    = errors.New("student is already registered")
+	ErrRegistrationNotFound = errors.New("registration not found")
+
+	ErrAlreadyCheckedIn    = errors.New("student already checked in")
+	ErrCheckInClosed       = errors.New("check-in is not available")
+	ErrInvalidCheckInToken = errors.New("invalid check-in token")
+	ErrNotRegistered       = errors.New("student is not registered for this event")
+
+	ErrInvalidEventDate = errors.New("event end date must be after start date")
+	ErrInvalidMaxPlaces = errors.New("max participants must be greater than zero")
 )
 
-type EventService struct {
+type Service struct {
 	db *gorm.DB
 }
 
-func NewEventService(db *gorm.DB) *EventService {
-	return &EventService{
+func NewService(db *gorm.DB) *Service {
+	return &Service{
 		db: db,
 	}
 }
 
-type CreateEventInput struct {
-	Title           string    `json:"title" binding:"required"`
-	Description     string    `json:"description" binding:"required"`
-	Place           string    `json:"place" binding:"required"`
-	Category        string    `json:"category" binding:"required"`
-	Date            time.Time `json:"date" binding:"required"`
-	MaxParticipants int       `json:"max_participants" binding:"required,min=1"`
-}
+// ============================================================
+// EVENT
+// ============================================================
 
-type UpdateEventInput struct {
-	Title           string    `json:"title" binding:"required"`
-	Description     string    `json:"description" binding:"required"`
-	Place           string    `json:"place" binding:"required"`
-	Category        string    `json:"category" binding:"required"`
-	Date            time.Time `json:"date" binding:"required"`
-	MaxParticipants int       `json:"max_participants" binding:"required,min=1"`
-}
-
-type EventResponse struct {
-	ID              uint      `json:"id"`
-	Title           string    `json:"title"`
-	Description     string    `json:"description"`
-	Place           string    `json:"place"`
-	Category        string    `json:"category"`
-	Date            time.Time `json:"date"`
-	MaxParticipants int       `json:"max_participants"`
-	AvailableSlots  int       `json:"available_slots"`
-}
-
-func (s *EventService) Create(input CreateEventInput) (*EventResponse, error) {
-	if input.MaxParticipants <= 0 {
-		return nil, ErrInvalidMaxParticipants
+func (s *Service) CreateEvent(event *Event) error {
+	if event.EndDate.Before(event.Date) || event.EndDate.Equal(event.Date) {
+		return ErrInvalidEventDate
 	}
 
-	event := Event{
-		Title:           input.Title,
-		Description:     input.Description,
-		Place:           input.Place,
-		Category:        input.Category,
-		Date:            input.Date,
-		MaxParticipants: input.MaxParticipants,
+	if event.MaxParticipants <= 0 {
+		return ErrInvalidMaxPlaces
 	}
 
-	if err := s.db.Create(&event).Error; err != nil {
+	event.CheckInToken = uuid.NewString()
+
+	return s.db.Create(event).Error
+}
+
+func (s *Service) GetEvent(id uint) (*Event, error) {
+	var event Event
+
+	if err := s.db.First(&event, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrEventNotFound
+		}
+
 		return nil, err
 	}
 
-	return s.buildEventResponse(event)
+	return &event, nil
 }
 
-func (s *EventService) List() ([]EventResponse, error) {
+func (s *Service) ListEvents() ([]Event, error) {
 	var events []Event
 
 	err := s.db.
 		Where("date > ?", time.Now()).
 		Order("date ASC").
-		Find(&events).Error
+		Find(&events).
+		Error
 
 	if err != nil {
 		return nil, err
 	}
 
-	responses := make([]EventResponse, 0, len(events))
-
-	for _, event := range events {
-		response, err := s.buildEventResponse(event)
-		if err != nil {
-			return nil, err
-		}
-
-		responses = append(responses, *response)
-	}
-
-	return responses, nil
+	return events, nil
 }
 
-func (s *EventService) GetByID(id uint) (*EventResponse, error) {
+func (s *Service) UpdateEvent(id uint, data *Event) (*Event, error) {
 	var event Event
 
-	err := s.db.First(&event, id).Error
-	if err != nil {
+	if err := s.db.First(&event, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrEventNotFound
 		}
@@ -113,60 +93,51 @@ func (s *EventService) GetByID(id uint) (*EventResponse, error) {
 		return nil, err
 	}
 
-	return s.buildEventResponse(event)
-}
-
-func (s *EventService) Update(id uint, input UpdateEventInput) (*EventResponse, error) {
-	if input.MaxParticipants <= 0 {
-		return nil, ErrInvalidMaxParticipants
+	if data.EndDate.Before(data.Date) || data.EndDate.Equal(data.Date) {
+		return nil, ErrInvalidEventDate
 	}
 
-	var event Event
-
-	err := s.db.First(&event, id).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrEventNotFound
-		}
-
-		return nil, err
+	if data.MaxParticipants <= 0 {
+		return nil, ErrInvalidMaxPlaces
 	}
 
-	var registrations int64
+	var registeredCount int64
 
 	if err := s.db.
 		Model(&EventRegistration{}).
 		Where("event_id = ?", id).
-		Count(&registrations).Error; err != nil {
+		Count(&registeredCount).
+		Error; err != nil {
 		return nil, err
 	}
 
-	// Não permite reduzir a capacidade abaixo da quantidade
-	// atual de inscritos.
-	if input.MaxParticipants < int(registrations) {
-		return nil, ErrEventFull
+	if int64(data.MaxParticipants) < registeredCount {
+		return nil, fmt.Errorf(
+			"max participants cannot be lower than current registrations (%d)",
+			registeredCount,
+		)
 	}
 
-	event.Title = input.Title
-	event.Description = input.Description
-	event.Place = input.Place
-	event.Category = input.Category
-	event.Date = input.Date
-	event.MaxParticipants = input.MaxParticipants
+	event.Title = data.Title
+	event.Description = data.Description
+	event.Place = data.Place
+	event.Category = data.Category
+	event.Date = data.Date
+	event.EndDate = data.EndDate
+	event.MaxParticipants = data.MaxParticipants
 
 	if err := s.db.Save(&event).Error; err != nil {
 		return nil, err
 	}
 
-	return s.buildEventResponse(event)
+	return &event, nil
 }
 
-func (s *EventService) Delete(id uint) error {
+func (s *Service) DeleteEvent(id uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		var event Event
 
-		err := tx.First(&event, id).Error
-		if err != nil {
+		if err := tx.First(&event, id).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return ErrEventNotFound
 			}
@@ -174,12 +145,31 @@ func (s *EventService) Delete(id uint) error {
 			return err
 		}
 
+		// Remove inscrições.
 		if err := tx.
 			Where("event_id = ?", id).
-			Delete(&EventRegistration{}).Error; err != nil {
+			Delete(&EventRegistration{}).
+			Error; err != nil {
 			return err
 		}
 
+		// Remove presenças.
+		if err := tx.
+			Where("event_id = ?", id).
+			Delete(&EventAttendance{}).
+			Error; err != nil {
+			return err
+		}
+
+		// Remove certificados.
+		if err := tx.
+			Where("event_id = ?", id).
+			Delete(&Certificate{}).
+			Error; err != nil {
+			return err
+		}
+
+		// Remove o evento.
 		if err := tx.Delete(&event).Error; err != nil {
 			return err
 		}
@@ -188,107 +178,395 @@ func (s *EventService) Delete(id uint) error {
 	})
 }
 
-func (s *EventService) RegisterStudent(eventID, studentID uint) error {
-	var event Event
+// ============================================================
+// EVENT DETAILS
+// ============================================================
 
-	err := s.db.First(&event, eventID).Error
+type EventDetails struct {
+	Event
+
+	RegisteredCount int64 `json:"registered_count"`
+	AvailableSlots  int64 `json:"available_slots"`
+}
+
+func (s *Service) GetEventDetails(id uint) (*EventDetails, error) {
+	event, err := s.GetEvent(id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrEventNotFound
-		}
-
-		return err
-	}
-
-	if !event.Date.After(time.Now()) {
-		return ErrEventNotFound
-	}
-
-	var existing EventRegistration
-
-	err = s.db.
-		Where("event_id = ? AND student_id = ?", eventID, studentID).
-		First(&existing).Error
-
-	if err == nil {
-		return ErrAlreadyRegistered
-	}
-
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-
-	var registrations int64
-
-	if err := s.db.
-		Model(&EventRegistration{}).
-		Where("event_id = ?", eventID).
-		Count(&registrations).Error; err != nil {
-		return err
-	}
-
-	if registrations >= int64(event.MaxParticipants) {
-		return ErrEventFull
-	}
-
-	registration := EventRegistration{
-		EventID:   eventID,
-		StudentID: studentID,
-	}
-
-	if err := s.db.Create(&registration).Error; err != nil {
-		// Caso duas requisições tentem registrar o mesmo aluno
-		// simultaneamente, o índice único protege o banco.
-		if errors.Is(err, gorm.ErrDuplicatedKey) {
-			return ErrAlreadyRegistered
-		}
-
-		return err
-	}
-
-	return nil
-}
-
-func (s *EventService) CancelRegistration(eventID, studentID uint) error {
-	result := s.db.
-		Where("event_id = ? AND student_id = ?", eventID, studentID).
-		Delete(&EventRegistration{})
-
-	if result.Error != nil {
-		return result.Error
-	}
-
-	if result.RowsAffected == 0 {
-		return ErrRegistrationNotFound
-	}
-
-	return nil
-}
-
-func (s *EventService) buildEventResponse(event Event) (*EventResponse, error) {
-	var registrations int64
-
-	if err := s.db.
-		Model(&EventRegistration{}).
-		Where("event_id = ?", event.ID).
-		Count(&registrations).Error; err != nil {
 		return nil, err
 	}
 
-	availableSlots := event.MaxParticipants - int(registrations)
+	var registeredCount int64
+
+	if err := s.db.
+		Model(&EventRegistration{}).
+		Where("event_id = ?", id).
+		Count(&registeredCount).
+		Error; err != nil {
+		return nil, err
+	}
+
+	availableSlots := int64(event.MaxParticipants) - registeredCount
 
 	if availableSlots < 0 {
 		availableSlots = 0
 	}
 
-	return &EventResponse{
-		ID:              event.ID,
-		Title:           event.Title,
-		Description:     event.Description,
-		Place:           event.Place,
-		Category:        event.Category,
-		Date:            event.Date,
-		MaxParticipants: event.MaxParticipants,
+	return &EventDetails{
+		Event:           *event,
+		RegisteredCount: registeredCount,
 		AvailableSlots:  availableSlots,
 	}, nil
+}
+
+// ============================================================
+// REGISTRATION
+// ============================================================
+
+func (s *Service) RegisterStudent(
+	eventID uint,
+	studentID uint,
+) (*EventRegistration, error) {
+
+	var registration EventRegistration
+
+	err := s.db.
+		Where(
+			"event_id = ? AND student_id = ?",
+			eventID,
+			studentID,
+		).
+		First(&registration).
+		Error
+
+	if err == nil {
+		return nil, ErrAlreadyRegistered
+	}
+
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	var event Event
+
+	if err := s.db.First(&event, eventID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrEventNotFound
+		}
+
+		return nil, err
+	}
+
+	// Não permite inscrição em eventos que já começaram.
+	if !time.Now().Before(event.Date) {
+		return nil, ErrCheckInClosed
+	}
+
+	var registeredCount int64
+
+	if err := s.db.
+		Model(&EventRegistration{}).
+		Where("event_id = ?", eventID).
+		Count(&registeredCount).
+		Error; err != nil {
+		return nil, err
+	}
+
+	if registeredCount >= int64(event.MaxParticipants) {
+		return nil, ErrEventFull
+	}
+
+	registration = EventRegistration{
+		EventID:   eventID,
+		StudentID: studentID,
+	}
+
+	if err := s.db.Create(&registration).Error; err != nil {
+		return nil, err
+	}
+
+	return &registration, nil
+}
+
+func (s *Service) CancelRegistration(
+	eventID uint,
+	studentID uint,
+) error {
+
+	var registration EventRegistration
+
+	err := s.db.
+		Where(
+			"event_id = ? AND student_id = ?",
+			eventID,
+			studentID,
+		).
+		First(&registration).
+		Error
+
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrRegistrationNotFound
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return s.db.Delete(&registration).Error
+}
+
+// ============================================================
+// CHECK-IN
+// ============================================================
+
+type CheckInResult struct {
+	Attendance  *EventAttendance `json:"attendance"`
+	Certificate *Certificate     `json:"certificate"`
+}
+
+func (s *Service) CheckIn(
+	eventID uint,
+	studentID uint,
+	token string,
+	now time.Time,
+) (*CheckInResult, error) {
+
+	var result CheckInResult
+
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var event Event
+
+		if err := tx.First(&event, eventID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrEventNotFound
+			}
+
+			return err
+		}
+
+		// Valida o token do QR Code.
+		if event.CheckInToken != token {
+			return ErrInvalidCheckInToken
+		}
+
+		// O check-in começa 30 minutos antes do evento.
+		checkInStart := event.Date.Add(-30 * time.Minute)
+
+		// O check-in termina quando o evento termina.
+		if now.Before(checkInStart) || now.After(event.EndDate) {
+			return ErrCheckInClosed
+		}
+
+		// O aluno precisa estar inscrito.
+		var registration EventRegistration
+
+		err := tx.
+			Where(
+				"event_id = ? AND student_id = ?",
+				eventID,
+				studentID,
+			).
+			First(&registration).
+			Error
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotRegistered
+		}
+
+		if err != nil {
+			return err
+		}
+
+		// Não permite check-in duplicado.
+		var existingAttendance EventAttendance
+
+		err = tx.
+			Where(
+				"event_id = ? AND student_id = ?",
+				eventID,
+				studentID,
+			).
+			First(&existingAttendance).
+			Error
+
+		if err == nil {
+			return ErrAlreadyCheckedIn
+		}
+
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		attendance := &EventAttendance{
+			EventID:     eventID,
+			StudentID:   studentID,
+			CheckedInAt: now,
+		}
+
+		if err := tx.Create(attendance).Error; err != nil {
+			return err
+		}
+
+		// Cria o certificado dentro da mesma transaction.
+		certificate := &Certificate{
+			EventID:   eventID,
+			StudentID: studentID,
+			Code:      generateCertificateCode(),
+			IssuedAt:  now,
+		}
+
+		if err := tx.Create(certificate).Error; err != nil {
+			return err
+		}
+
+		result.Attendance = attendance
+		result.Certificate = certificate
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+func generateCertificateCode() string {
+	return fmt.Sprintf(
+		"CERT-%s",
+		uuid.NewString(),
+	)
+}
+
+// ============================================================
+// ATTENDANCE / CHECK-IN SCREEN
+// ============================================================
+
+type CheckInInfo struct {
+	EventID         uint   `json:"event_id"`
+	Title           string `json:"title"`
+	Date            string `json:"date"`
+	EndDate         string `json:"end_date"`
+	CheckInStartsAt string `json:"check_in_starts_at"`
+	CheckInEndsAt   string `json:"check_in_ends_at"`
+
+	QRCode string `json:"qr_code"`
+
+	TotalRegistered int64 `json:"total_registered"`
+	TotalPresent    int64 `json:"total_present"`
+}
+
+func (s *Service) GetCheckInInfo(
+	eventID uint,
+	frontendURL string,
+) (*CheckInInfo, error) {
+
+	var event Event
+
+	if err := s.db.First(&event, eventID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrEventNotFound
+		}
+
+		return nil, err
+	}
+
+	qrCode, err := GenerateCheckInQRCode(
+		&event,
+		frontendURL,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var registered int64
+	var present int64
+
+	if err := s.db.
+		Model(&EventRegistration{}).
+		Where("event_id = ?", eventID).
+		Count(&registered).
+		Error; err != nil {
+		return nil, err
+	}
+
+	if err := s.db.
+		Model(&EventAttendance{}).
+		Where("event_id = ?", eventID).
+		Count(&present).
+		Error; err != nil {
+		return nil, err
+	}
+
+	return &CheckInInfo{
+		EventID:         event.ID,
+		Title:           event.Title,
+		Date:            event.Date.Format(time.RFC3339),
+		EndDate:         event.EndDate.Format(time.RFC3339),
+		CheckInStartsAt: event.Date.Add(-30 * time.Minute).Format(time.RFC3339),
+		CheckInEndsAt:   event.EndDate.Format(time.RFC3339),
+
+		QRCode: qrCode,
+
+		TotalRegistered: registered,
+		TotalPresent:    present,
+	}, nil
+}
+
+func (s *Service) GetAttendanceCount(
+	eventID uint,
+) (int64, error) {
+
+	var count int64
+
+	err := s.db.
+		Model(&EventAttendance{}).
+		Where("event_id = ?", eventID).
+		Count(&count).
+		Error
+
+	return count, err
+}
+
+// ============================================================
+// CERTIFICATE
+// ============================================================
+
+func (s *Service) GetCertificate(
+	id uint,
+) (*Certificate, error) {
+
+	var certificate Certificate
+
+	if err := s.db.First(&certificate, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, gorm.ErrRecordNotFound
+		}
+
+		return nil, err
+	}
+
+	return &certificate, nil
+}
+
+func (s *Service) GetCertificateByCode(
+	code string,
+) (*Certificate, error) {
+
+	var certificate Certificate
+
+	if err := s.db.
+		Where("code = ?", code).
+		First(&certificate).
+		Error; err != nil {
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, gorm.ErrRecordNotFound
+		}
+
+		return nil, err
+	}
+
+	return &certificate, nil
 }
