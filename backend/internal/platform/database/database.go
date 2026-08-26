@@ -21,6 +21,8 @@ func Connect() *gorm.DB {
 		&auth.User{},
 		&event.Event{},
 		&event.EventRegistration{},
+		&event.EventAttendance{},
+		&event.Certificate{},
 	)
 
 	return db

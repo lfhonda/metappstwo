@@ -14,7 +14,6 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 	r.Use(gin.Logger())
 	r.Use(gin.Recovery())
 
-	// Auth
 	authService := auth.NewAuthService(db)
 	authHandler := auth.NewAuthHandler(authService)
 
@@ -28,58 +27,86 @@ func SetupRouter(db *gorm.DB) *gin.Engine {
 		authHandler.RegisterStudent,
 	)
 
-	// Events
-	eventService := event.NewEventService(db)
-	eventHandler := event.NewEventHandler(eventService)
+	eventService := event.NewService(db)
+	eventHandler := event.NewHandler(eventService)
 
-	// Eventos podem ser visualizados por usuários autenticados.
-	r.GET(
-		"/events",
+	events := r.Group("/events")
+
+	// Alunos e professores
+	events.GET(
+		"",
 		middleware.AuthMiddleware(),
 		eventHandler.List,
 	)
 
-	r.GET(
-		"/events/:id",
+	events.GET(
+		"/:id",
 		middleware.AuthMiddleware(),
-		eventHandler.GetByID,
+		eventHandler.Get,
 	)
 
-	// Professores gerenciam eventos.
-	r.POST(
-		"/events",
+	// Professores
+	events.POST(
+		"",
 		middleware.AuthMiddleware(),
 		middleware.RoleMiddleware("teacher"),
 		eventHandler.Create,
 	)
 
-	r.PUT(
-		"/events/:id",
+	events.PUT(
+		"/:id",
 		middleware.AuthMiddleware(),
 		middleware.RoleMiddleware("teacher"),
 		eventHandler.Update,
 	)
 
-	r.DELETE(
-		"/events/:id",
+	events.DELETE(
+		"/:id",
 		middleware.AuthMiddleware(),
 		middleware.RoleMiddleware("teacher"),
 		eventHandler.Delete,
 	)
 
-	// Alunos gerenciam suas próprias inscrições.
-	r.POST(
-		"/events/:id/register",
+	events.GET(
+		"/:id/check-in",
+		middleware.AuthMiddleware(),
+		middleware.RoleMiddleware("teacher"),
+		eventHandler.CheckInScreen,
+	)
+
+	// Alunos
+	events.POST(
+		"/:id/register",
 		middleware.AuthMiddleware(),
 		middleware.RoleMiddleware("student"),
 		eventHandler.Register,
 	)
 
-	r.DELETE(
-		"/events/:id/register",
+	events.DELETE(
+		"/:id/register",
 		middleware.AuthMiddleware(),
 		middleware.RoleMiddleware("student"),
 		eventHandler.CancelRegistration,
+	)
+
+	events.POST(
+		"/:id/check-in",
+		middleware.AuthMiddleware(),
+		middleware.RoleMiddleware("student"),
+		eventHandler.CheckIn,
+	)
+
+	// Certificados
+	r.GET(
+		"/certificates/:id/pdf",
+		middleware.AuthMiddleware(),
+		middleware.RoleMiddleware("student"),
+		eventHandler.CertificatePDF,
+	)
+
+	r.GET(
+		"/certificates/verify/:code",
+		eventHandler.VerifyCertificate,
 	)
 
 	return r
